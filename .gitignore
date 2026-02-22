@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+seen_jobs.json
+*.log
+*.png
+*.html
