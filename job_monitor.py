@@ -18,8 +18,8 @@ import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # ── CONFIG — fill these in ───────────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN = "8317754575:AAEVTDZOy58756Jfwpor8cF1TB_7LNDy750"
-TELEGRAM_CHAT_ID   = "6571183240"
+TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 
 URLS = [
     {
