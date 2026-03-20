@@ -1,55 +1,25 @@
 """
-Amazon Jobs Telegram Bot — Railway Edition
+Amazon Jobs Telegram Bot — Final Working Version
 
-Changes for Railway hosting:
-  - Playwright chromium installed via --with-deps at build time
-  - seen_jobs.json stored in /data (mount a Railway volume there)
-  - Graceful env var validation with clear error messages
-  - Job ID uses title + location only (pay excluded — too volatile)
-  - Fields normalized before ID generation (lowercase, no punctuation)
-  - seen_jobs stores timestamps; entries expire after EXPIRY_DAYS (default 2)
+Requirements:
+    pip install playwright requests
+    playwright install chromium
 
-Railway Setup:
-  1. Add environment variables in Railway dashboard:
-       TELEGRAM_BOT_TOKEN   → your bot token from @BotFather
-       TELEGRAM_CHAT_ID     → your chat/channel ID
-  2. Add a Volume mounted at /data (so seen_jobs.json persists across redeploys)
-  3. Set Build Command:
-       pip install -r requirements.txt && playwright install chromium --with-deps
-  4. Set Start Command:
-       python amazon_jobs_bot.py
-
-requirements.txt should contain:
-  playwright
-  requests
+Setup:
+    1. Fill in TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID below
+    2. Run: python amazon_jobs_bot.py
+    3. Schedule with cron (see bottom of file)
 """
 
 import json
 import os
-import re
-import sys
 import time
 import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
-# ── CONFIG ────────────────────────────────────────────────────────────────────
-
-def _require_env(name: str) -> str:
-    value = os.environ.get(name)
-    if not value:
-        print(f"[FATAL] Missing required environment variable: {name}", flush=True)
-        sys.exit(1)
-    return value
-
-TELEGRAM_BOT_TOKEN = _require_env("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID   = _require_env("TELEGRAM_CHAT_ID")
-
-EXPIRY_DAYS = int(os.environ.get("EXPIRY_DAYS", "2"))
-
-# Store seen_jobs in /data so it persists across Railway redeploys via a mounted volume.
-# Falls back to local file if /data doesn't exist (useful for local testing).
-_DATA_DIR = "/data" if os.path.isdir("/data") else "."
-SEEN_JOBS_FILE = os.path.join(_DATA_DIR, "seen_jobs.json")
+# ── CONFIG — fill these in ───────────────────────────────────────────────────
+TELEGRAM_BOT_TOKEN = "8317754575:AAEVTDZOy58756Jfwpor8cF1TB_7LNDy750"
+TELEGRAM_CHAT_ID   = "6571183240"
 
 URLS = [
     {
@@ -62,50 +32,20 @@ URLS = [
     },
 ]
 
+SEEN_JOBS_FILE = "seen_jobs.json"
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def normalize(text: str) -> str:
-    """Lowercase, strip punctuation, collapse whitespace for stable ID generation."""
-    text = text.lower().strip()
-    text = re.sub(r'[^\w\s]', '', text)
-    text = re.sub(r'\s+', ' ', text)
-    return text
-
-
-def make_job_id(title: str, location: str) -> str:
-    """Stable job ID from title + location only. Pay excluded — changes too often."""
-    return f"{normalize(title)}|{normalize(location)}"
-
-
-def load_seen_jobs() -> dict:
-    """Returns {job_id: unix_timestamp} dict."""
+def load_seen_jobs() -> set:
     if os.path.exists(SEEN_JOBS_FILE):
-        try:
-            with open(SEEN_JOBS_FILE, "r") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            print(f"[Warning] Could not read seen_jobs file: {e}. Starting fresh.", flush=True)
-    return {}
+        with open(SEEN_JOBS_FILE, "r") as f:
+            return set(json.load(f))
+    return set()
 
 
-def save_seen_jobs(seen: dict):
-    try:
-        with open(SEEN_JOBS_FILE, "w") as f:
-            json.dump(seen, f, indent=2)
-    except OSError as e:
-        print(f"[Warning] Could not save seen_jobs file: {e}", flush=True)
-        print(f"  Tip: Mount a Railway Volume at /data to persist seen jobs.", flush=True)
-
-
-def purge_expired(seen: dict) -> dict:
-    """Remove jobs older than EXPIRY_DAYS so they can trigger a re-notification."""
-    cutoff = time.time() - (EXPIRY_DAYS * 86400)
-    purged = {job_id: ts for job_id, ts in seen.items() if ts > cutoff}
-    removed = len(seen) - len(purged)
-    if removed:
-        print(f"  🗑 Purged {removed} expired job(s) from seen list", flush=True)
-    return purged
+def save_seen_jobs(seen: set):
+    with open(SEEN_JOBS_FILE, "w") as f:
+        json.dump(list(seen), f)
 
 
 def send_telegram_message(text: str):
@@ -116,38 +56,35 @@ def send_telegram_message(text: str):
         "parse_mode": "HTML",
         "disable_web_page_preview": False,
     }
-    try:
-        resp = requests.post(url, json=payload, timeout=10)
-        if not resp.ok:
-            print(f"  [Telegram Error] {resp.status_code}: {resp.text}", flush=True)
-        else:
-            print("  ✅ Telegram message sent", flush=True)
-    except requests.RequestException as e:
-        print(f"  [Telegram Error] Request failed: {e}", flush=True)
+    resp = requests.post(url, json=payload, timeout=10)
+    if not resp.ok:
+        print(f"  [Telegram Error] {resp.status_code}: {resp.text}")
+    else:
+        print("  ✅ Telegram message sent")
 
 
 def dismiss_popups(page):
-    """Dismiss cookie banner and profile modal if they appear."""
-    # Cookie banner
+    """Dismiss cookie banner and profile modal."""
+    # 1. Cookie banner
     try:
         page.locator("text=Continue without accepting").wait_for(timeout=8000)
         page.locator("text=Continue without accepting").click()
         page.wait_for_timeout(1500)
-        print("  🍪 Cookie banner dismissed", flush=True)
+        print("  🍪 Cookie banner dismissed")
     except PlaywrightTimeoutError:
         try:
             page.locator("text=Accept all").click(timeout=3000)
             page.wait_for_timeout(1500)
-            print("  🍪 Cookie banner accepted", flush=True)
+            print("  🍪 Cookie banner accepted")
         except PlaywrightTimeoutError:
             pass
 
-    # "Tell us about yourself" modal
+    # 2. "Tell us about yourself" modal
     for sel in ["button[aria-label='Close']", "[role='dialog'] button", "[class*='modal'] button"]:
         try:
             page.locator(sel).first.click(timeout=4000)
             page.wait_for_timeout(1000)
-            print("  👤 Profile modal dismissed", flush=True)
+            print(f"  👤 Profile modal dismissed")
             break
         except Exception:
             pass
@@ -155,40 +92,50 @@ def dismiss_popups(page):
 
 def parse_card(card, label: str, page_url: str) -> dict | None:
     """
-    Extract job details from a card:
+    Extract job details from a card using the confirmed class names:
       - Title:    first <strong> inside .jobDetailText
       - Type:     second .jobDetailText div (contains "Type:")
       - Duration: [data-test-id='jobCardDurationText']
       - Pay:      [data-test-id='jobCardPayRateText']
-      - Location: last <strong> in the card
+      - Location: last <strong> in the card (.hvh-careers-emotion-1i5392n > strong)
     """
     try:
+        # All jobDetailText divs in order: title, type, duration, pay
         detail_divs = card.query_selector_all(".jobDetailText")
-        if not detail_divs:
-            return None
 
+        if not detail_divs:
+            return None  # Empty padding card — skip
+
+        # Title is the first strong inside the first jobDetailText
         title_el = detail_divs[0].query_selector("strong")
         title = title_el.inner_text().strip() if title_el else None
-        if not title:
-            return None
 
+        if not title:
+            return None  # Skip empty cards
+
+        # Pay rate has a reliable data-test-id
         pay_el = card.query_selector("[data-test-id='jobCardPayRateText']")
         pay_text = pay_el.inner_text().strip() if pay_el else ""
+        # Strip the "Pay rate: " prefix
         pay = pay_text.replace("Pay rate:", "").strip()
 
+        # Duration
         duration_el = card.query_selector("[data-test-id='jobCardDurationText']")
         duration_text = duration_el.inner_text().strip() if duration_el else ""
         duration = duration_text.replace("Duration:", "").strip()
 
+        # Job type (Part Time / Full Time) — second detail div
         job_type = ""
         if len(detail_divs) >= 2:
             type_text = detail_divs[1].inner_text().strip()
             job_type = type_text.replace("Type:", "").strip()
 
+        # Location — the last <strong> in the card (outside jobDetailText)
         all_strongs = card.query_selector_all("strong")
         location = all_strongs[-1].inner_text().strip() if all_strongs else "Unknown"
 
-        job_id = make_job_id(title, location)
+        # Link — cards don't have <a> tags, so build search URL as fallback
+        job_id = f"{title}|{location}|{pay}"
 
         return {
             "id":       job_id,
@@ -202,7 +149,7 @@ def parse_card(card, label: str, page_url: str) -> dict | None:
         }
 
     except Exception as e:
-        print(f"  [Warning] Error parsing card: {e}", flush=True)
+        print(f"  [Warning] Error parsing card: {e}")
         return None
 
 
@@ -210,17 +157,7 @@ def scrape_jobs(url: str, label: str) -> list:
     jobs = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                # Required for running Chromium inside Railway/Docker containers
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--single-process",
-            ]
-        )
+        browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -232,33 +169,31 @@ def scrape_jobs(url: str, label: str) -> list:
         )
         page = context.new_page()
 
-        print(f"\n[Scraping] {label}", flush=True)
-        try:
-            page.goto(url, wait_until="networkidle", timeout=60000)
-        except PlaywrightTimeoutError:
-            print("  [Warning] Page load timed out — attempting to continue anyway", flush=True)
-
+        print(f"\n[Scraping] {label}")
+        page.goto(url, wait_until="networkidle", timeout=60000)
         page.wait_for_timeout(3000)
+
         dismiss_popups(page)
 
+        # Wait for job cards to appear
         try:
             page.wait_for_selector("[class*='jobCard']", timeout=20000)
         except PlaywrightTimeoutError:
-            print("  ❌ No job cards appeared within 20s", flush=True)
+            print("  ❌ No job cards appeared within 20s")
             browser.close()
             return []
 
         page.wait_for_timeout(1000)
         cards = page.query_selector_all("[class*='jobCard']")
-        print(f"  📋 {len(cards)} card slot(s) found", flush=True)
+        print(f"  📋 {len(cards)} card slots found")
 
         for card in cards:
             job = parse_card(card, label, url)
             if job:
                 jobs.append(job)
-                print(f"  ✅ {job['title']} | {job['type']} | {job['pay']} | {job['location']}", flush=True)
+                print(f"  ✅ {job['title']} | {job['type']} | {job['pay']} | {job['location']}")
 
-        print(f"  → {len(jobs)} valid job(s) extracted", flush=True)
+        print(f"  → {len(jobs)} valid job(s) extracted")
         browser.close()
 
     return jobs
@@ -266,8 +201,8 @@ def scrape_jobs(url: str, label: str) -> list:
 
 def format_message(job: dict) -> str:
     lines = [
-        "🆕 <b>New Amazon Job!</b>",
-        "",
+        f"🆕 <b>New Amazon Job!</b>",
+        f"",
         f"📋 <b>{job['title']}</b>",
         f"🏷 Category: {job['category']}",
     ]
@@ -283,32 +218,39 @@ def format_message(job: dict) -> str:
 
 
 def run():
-    print("=" * 50, flush=True)
-    print("Amazon Jobs Bot — Starting run", flush=True)
-    print(f"Seen jobs file: {SEEN_JOBS_FILE}", flush=True)
-    print("=" * 50, flush=True)
+    print("=" * 50)
+    print("Amazon Jobs Bot — Starting run")
+    print("=" * 50)
 
     seen_jobs = load_seen_jobs()
-    seen_jobs = purge_expired(seen_jobs)
     new_count = 0
 
     for entry in URLS:
         jobs = scrape_jobs(entry["url"], entry["label"])
         for job in jobs:
             if job["id"] not in seen_jobs:
-                print(f"\n  🔔 NEW JOB: {job['title']} @ {job['location']}", flush=True)
+                print(f"\n  🔔 NEW JOB: {job['title']} @ {job['location']}")
                 send_telegram_message(format_message(job))
-                seen_jobs[job["id"]] = time.time()
+                seen_jobs.add(job["id"])
                 new_count += 1
-                time.sleep(1)  # avoid Telegram rate limits
-            else:
-                print(f"  ⏭ Already seen: {job['title']} @ {job['location']}", flush=True)
+                time.sleep(1)  # Avoid Telegram rate limits
 
     save_seen_jobs(seen_jobs)
-    print(f"\n{'='*50}", flush=True)
-    print(f"Run complete. {new_count} new job(s) notified.", flush=True)
-    print("=" * 50, flush=True)
+    print(f"\n{'='*50}")
+    print(f"Run complete. {new_count} new job(s) notified.")
+    print("=" * 50)
 
 
 if __name__ == "__main__":
     run()
+
+
+# ── HOW TO SCHEDULE (run every 30 minutes) ───────────────────────────────────
+#
+# Mac/Linux — add to crontab:
+#   crontab -e
+#   */30 * * * * /path/to/venv/bin/python /path/to/amazon_jobs_bot.py >> /path/to/bot.log 2>&1
+#
+# To find your venv python path:
+#   which python   (while venv is active)
+# ─────────────────────────────────────────────────────────────────────────────
